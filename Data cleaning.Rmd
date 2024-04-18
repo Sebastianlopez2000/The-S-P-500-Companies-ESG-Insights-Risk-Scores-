@@ -1,0 +1,342 @@
+---
+title: "Data visualisation second data cleaning"
+author: "Ben Lopez"
+date: "2024-04-04"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(VIM)
+library(dplyr)
+library(tidyr)
+library(zoo)
+library(mice)
+library(ggplot2)
+```
+
+```{r}
+# read in data
+data <- read.csv("SP 500 ESG Risk Ratings.csv")
+str(data)
+```
+
+# Check and deal with missingness
+```{r}
+# Check NAs in each variable
+colSums(is.na(data))
+```
+There are 70 NA values in the ESG ratings related variables. Total.ESG.Risk.score and Controversy.Score are both affected by these variables. Controversy.Score is a numeric conversion of Controversy.Level (which has no NA values).
+
+```{r}
+# Check for categorical missingness
+colSums((data == ""))
+```
+Controversy.Level does however have 99 values with no value inside of it
+
+```{r}
+# Identify duplicates in the data frame
+duplicate_rows <- duplicated(data)
+
+# Print the number of duplicate rows
+cat("Number of duplicate rows:", sum(duplicate_rows), "\n")
+```
+
+```{r}
+# Impute Environment.Risk.Score using the mean based on Sector
+new_data <- data %>%
+  group_by(Sector) %>%
+  mutate(Environment.Risk.Score = case_when(
+    is.na(Environment.Risk.Score) ~ mean(Environment.Risk.Score, na.rm = TRUE),
+    TRUE ~ Environment.Risk.Score
+  )) %>%
+  ungroup()
+
+# Round Environment.Risk.Score to the nearest whole number
+new_data$Environment.Risk.Score <- round(new_data$Environment.Risk.Score, digits = 2)
+
+# Check the number of NA's in Environment.Risk.Score
+sum(is.na(new_data$Environment.Risk.Score))
+print("There are 0 NA values in the Environment.Risk.Score variable")
+
+# Check Environment.Risk.Score's new distribution
+hist(data$Environment.Risk.Score)
+hist(new_data$Environment.Risk.Score)
+```
+The distribution, although not identical, takes the mean of each sector's Environment.Risk.Score and assigns it to the observation with an NA value with the same sector. The overall distribution is the same for both pre and post implementation.
+
+```{r}
+# Create a mice imputation object for Governance.Risk.Score
+imputed_data <- mice(new_data, method = "pmm", m = 5)
+
+# Complete the imputation process
+imputed_data <- complete(imputed_data)
+
+# Replace the imputed values in Governance.Risk.Score
+new_data$Governance.Risk.Score <- imputed_data$Governance.Risk.Score
+
+# Check the number of NA's in new_Governance.Risk.Score
+sum(is.na(new_data$Governance.Risk.Score))
+print("There are 0 NA values in the Governance.Risk.Score")
+
+# Check Environment.Risk.Score's new distribution
+hist(data$Governance.Risk.Score)
+hist(new_data$Governance.Risk.Score)
+```
+
+```{r}
+# Create a MICE imputation object for Social.Risk.Score
+mice_obj <- mice(new_data, method = "pmm", m = 5)
+
+# Perform the imputation
+imputed_data <- complete(mice_obj)
+
+# Replace the imputed values in the original dataset
+new_data$Social.Risk.Score <- imputed_data$Social.Risk.Score
+
+# Check the number of NA's in Social.Risk.Score
+sum(is.na(new_data$Social.Risk.Score))
+print("There are 0 NA values in the Social.Risk.Score")
+
+# Check Social.Risk.Score's new distribution
+hist(data$Social.Risk.Score)
+hist(new_data$Social.Risk.Score)
+```
+As seen above, both pre/post imputed variables look similar. Now that Environment.Risk.Score, Governance.Risk.Score, and Social.Risk.Score have been imputed, we can impute Total.ESG.Risk.score based on these variables.
+
+```{r}
+# Check for missing values in Total.ESG.Risk.score
+missing_total_esg <- is.na(new_data$Total.ESG.Risk.score)
+
+# Create a subset of data without missing values in the predictors
+subset_data <- subset(new_data, !missing_total_esg, 
+                      select = c(Social.Risk.Score, Governance.Risk.Score, Environment.Risk.Score, Total.ESG.Risk.score))
+
+# Fit a linear regression model to predict Total.ESG.Risk.score based on the other variables
+lm_model <- lm(Total.ESG.Risk.score ~ Social.Risk.Score + Governance.Risk.Score + Environment.Risk.Score, 
+               data = subset_data)
+
+# Predict the missing values of Total.ESG.Risk.score using the fitted regression model
+new_data$Total.ESG.Risk.score[missing_total_esg] <- predict(lm_model, newdata = new_data[missing_total_esg, ])
+
+# Round Total.ESG.Risk.score
+new_data$Total.ESG.Risk.score <- round(new_data$Total.ESG.Risk.score, digits = 2)
+
+# Check if there are any remaining NA values
+sum(is.na(new_data$Total.ESG.Risk.score))
+
+# Check Social.Risk.Score's new distribution
+hist(data$Total.ESG.Risk.score)
+hist(new_data$Total.ESG.Risk.score)
+```
+Now that Total ESG score has been imputed, I can impute Controversy.Score
+
+```{r}
+# First, ensure that the 'Controversy.Level' column is a factor
+new_data$Controversy.Level <- factor(new_data$Controversy.Level)
+
+# Use the aggregate function to find min and max for each level
+result <- aggregate(new_data$Total.ESG.Risk.score, 
+                    by = list(Controversy_Level = new_data$Controversy.Level), 
+                    FUN = function(x) c(min = min(x), max = max(x)))
+
+# Count the number of rows for each level of Controversy.Level
+controversy_counts <- table(new_data$Controversy.Level)
+
+# Find the maximum value in Total.ESG.Risk.score
+max_score <- max(new_data$Total.ESG.Risk.score)
+
+# Find the minimum value in Total.ESG.Risk.score
+min_score <- min(new_data$Total.ESG.Risk.score)
+```
+None and "" need to be imputed. the minimum and maximum Total.ESG.Risk.score's are 7 and 46 and there are 5 levels. (46-7)/5 = 7.8. Each level in Controversy.score should follow: 7-14.9 Low, 15-22.9 Moderate, 23-30.9 Significant, 31-38.9 High, 39-46.9 Severe.
+
+```{r}
+# Create a new column for Controversy.Level based on Total.ESG.Risk.score ranges
+new_data <- new_data %>%
+  mutate(Controversy.Level = case_when(
+    Total.ESG.Risk.score >= 7 & Total.ESG.Risk.score <= 15 ~ "Low",
+    Total.ESG.Risk.score >= 15 & Total.ESG.Risk.score <= 23 ~ "Moderate",
+    Total.ESG.Risk.score >= 23 & Total.ESG.Risk.score <= 31 ~ "Significant",
+    Total.ESG.Risk.score >= 31 & Total.ESG.Risk.score <= 39 ~ "High",
+    Total.ESG.Risk.score >= 39 & Total.ESG.Risk.score <= 47 ~ "Severe",
+    TRUE ~ NA_character_
+  ))
+
+# Check if there are any remaining NA values in Controversy.Level
+anyNA(new_data$Controversy.Level)
+unique(new_data$Controversy.Level)
+```
+Now we can impute the missing values in Controversy.Score where 1 = Low, 2 = Moderate, 3 = Significant, 4 = High, 5 = Severe
+
+```{r}
+# Update Controversy.Score based on Controversy.Level
+new_data <- new_data %>%
+  mutate(Controversy.Score = case_when(
+    Controversy.Level == "Low" ~ 1,
+    Controversy.Level == "Moderate" ~ 2,
+    Controversy.Level == "Significant" ~ 3,
+    Controversy.Level == "High" ~ 4,
+    Controversy.Level == "Severe" ~ 5,
+    TRUE ~ Controversy.Score  # Keep existing values for other cases
+  ))
+```
+
+```{r}
+# Remove empty strings from ESG.Risk.Percentile
+new_data$ESG.Risk.Percentile[new_data$ESG.Risk.Percentile == ""] <- NA
+
+# Extract numeric part of the string and convert to numeric
+new_data$ESG.Risk.Percentile <- as.numeric(gsub("\\D", "", new_data$ESG.Risk.Percentile))
+
+# Check unique values
+unique(new_data$ESG.Risk.Percentile)
+sum(is.na(new_data$ESG.Risk.Percentile))
+```
+
+```{r}
+# Convert the 'ESG.Risk.Percentile' column to numeric
+new_data$ESG.Risk.Percentile <- as.numeric(new_data$ESG.Risk.Percentile)
+
+# Calculate total number of companies
+total_companies <- nrow(new_data)
+
+# Calculate percentile rank for each company
+percentile_rank <- (rank(new_data$Total.ESG.Risk.score) - 0.5) / total_companies * 100
+
+# Impute missing values with the calculated percentile ranks
+new_data$ESG.Risk.Percentile[is.na(new_data$ESG.Risk.Percentile)] <- percentile_rank[is.na(new_data$ESG.Risk.Percentile)]
+
+# Round ESG.Risk.Percentile to two decimal places
+new_data$ESG.Risk.Percentile <- round(new_data$ESG.Risk.Percentile, digits = 2)
+
+# Before Imputation: Distribution of ESG.Risk.Percentile
+data1ESG.Risk.Percentile <- as.numeric(gsub("\\D", "", data$ESG.Risk.Percentile))
+hist(data1ESG.Risk.Percentile, main = "Distribution of ESG.Risk.Percentile (Before Imputation)",
+     xlab = "ESG.Risk.Percentile", col = "skyblue", border = "black")
+
+# After Imputation: Distribution of ESG.Risk.Percentile
+hist(new_data$ESG.Risk.Percentile, main = "Distribution of ESG.Risk.Percentile (After Imputation)",
+     xlab = "ESG.Risk.Percentile", col = "lightgreen", border = "black")
+
+```
+
+```{r}
+# Remove empty strings in ESG.Risk.Level
+new_data$ESG.Risk.Level[new_data$ESG.Risk.Level == ""] <- NA
+unique(new_data$ESG.Risk.Level)
+
+# Box Plot of ESG percentile vs level
+boxplot(ESG.Risk.Percentile ~ ESG.Risk.Level, data = new_data,
+        xlab = "ESG Risk Level", ylab = "ESG Risk Percentile",
+        main = "Box Plot of ESG Risk Percentile by Level")
+
+# Function to find max and min percentiles for each ESG.Risk.Level
+find_max_min_percentile <- function(level) {
+  # Filter rows where ESG.Risk.Level matches the specified level
+  subset_rows <- subset(new_data, ESG.Risk.Level == level)
+  
+  # Find the maximum and minimum ESG.Risk.Percentile in the subset
+  max_percentile <- max(subset_rows$ESG.Risk.Percentile, na.rm = TRUE)
+  min_percentile <- min(subset_rows$ESG.Risk.Percentile, na.rm = TRUE)
+  
+  # Print the results
+  cat("Max ESG.Risk.Percentile in", level, "rows:", max_percentile, "\n")
+  cat("Min ESG.Risk.Percentile in", level, "rows:", min_percentile, "\n")
+}
+
+# List of ESG.Risk.Levels
+levels <- c("Negligible", "Low", "Medium", "High", "Severe")
+
+# Loop through each level and find max and min percentiles
+for (level in levels) {
+  find_max_min_percentile(level)
+}
+```
+If ESG.Risk.Percentile is between 0 & 25 it is considered "low" and "Negligible". 26 & 65 is medium. 64 & 85 is High. 66 & 96 is Severe. This is unorganized, instead it will be:
+
+```{r}
+# Impute missing ESG.Risk.Level values based on ESG.Risk.Percentile
+new_data <- mutate(new_data, ESG.Risk.Level = 
+                    case_when(
+                      between(ESG.Risk.Percentile, 85, 100) ~ "Severe",
+                      between(ESG.Risk.Percentile, 66, 85) ~ "High",
+                      between(ESG.Risk.Percentile, 26, 65) ~ "Medium",
+                      TRUE ~ "Low"))
+```
+
+```{r}
+# Impute missingness in Full.Time.Employees
+# Remove commas from the values
+new_data$Full.Time.Employees <- gsub(",", "", new_data$Full.Time.Employees)
+
+# Convert Full.Time.Employees from character to numeric
+new_data$Full.Time.Employees <- as.numeric(new_data$Full.Time.Employees)
+
+# Check if conversion was successful
+str(new_data$Full.Time.Employees)
+
+# Calculate the mean of Full.Time.Employees
+mean_employees <- mean(new_data$Full.Time.Employees, na.rm = TRUE)
+
+# Impute missing values with the mean
+new_data$Full.Time.Employees[is.na(new_data$Full.Time.Employees)] <- mean_employees
+
+# Check for any NAs in Full.Time.Employees
+sum(is.na(new_data$Full.Time.Employees))
+
+# Check their distributions
+hist(new_data$Full.Time.Employees)
+# Remove commas from the values
+data$Full.Time.Employees <- gsub(",", "", data$Full.Time.Employees)
+# Convert Full.Time.Employees from character to numeric
+data$Full.Time.Employees <- as.numeric(data$Full.Time.Employees)
+hist(data$Full.Time.Employees)
+```
+
+```{r}
+# Impute the "" values in Sector
+# Find the rows in Sector with ""
+empty_sector_rows <- new_data[new_data$Sector == "", ]
+
+# Find the mode of the Sector column
+sector_mode <- names(sort(table(new_data$Sector), decreasing = TRUE))[1]
+
+# Impute missing values with the mode
+new_data$Sector[new_data$Sector == ""] <- sector_mode
+```
+
+```{r}
+# Impute the "" values in Industry
+# Find the mode of the Industry column
+industry_mode <- names(sort(table(new_data$Industry), decreasing = TRUE))[1]
+
+# Impute missing values with the mode
+new_data$Industry[new_data$Industry == ""] <- industry_mode
+```
+
+# Subset data
+This dataset has 15 columns and 503 observations. To meet the minimum requirements of the assesment task, there must be at least 6 variable and 500 rows of data.
+
+Still, Symbol, Address, and Description are unlikely to provide insight into the following simple questions: 
+1.	Which industries have the highest social, environmental and governance ratings according to the S&P 500 ESG Ratings Index??
+2.	What relationship, if any, does organizational size have on Total ESG ratings according to the S&P 500 ESG Ratings Index?
+
+Complex question
+1.	What impact does the sector in which companies of various sizes operate have on their social, environmental and governance ratings? 
+Why? Smaller companies may only have enough resources for social impact, while larger companies in the same sector may have enough resources to tackle fundamental problems, i.e. the environment.
+
+```{r}
+# Remove the not insightful columns
+new_data <- subset(new_data, select = -c(Symbol, Address,Description))
+```
+
+
+```{r}
+# Export new_data as Cleaned SP500 ESG ratings.csv
+write.csv(new_data, file = "Cleaned SP500 ESG ratings2.csv", row.names = FALSE)
+```
+
